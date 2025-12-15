@@ -23,6 +23,8 @@ from azure.search.documents.knowledgebases.models import (
 )
 from dotenv import load_dotenv
 from fastmcp import FastMCP
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
 
 load_dotenv(override=True)
 
@@ -30,6 +32,9 @@ load_dotenv(override=True)
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(level=log_level, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("AISearchMCP")
+
+# API Key authentication (optional)
+MCP_API_KEY = os.getenv("MCP_API_KEY")
 
 # Azure configuration
 AZURE_SEARCH_ENDPOINT = os.getenv("AZURE_SEARCH_ENDPOINT")
@@ -85,6 +90,65 @@ def get_search_client() -> SearchClient:
 
 # Initialize the MCP server
 mcp = FastMCP("Azure AI Search MCP Server")
+
+
+# ==================== Health Check Endpoint ====================
+# Required for Azure Container Apps health probes (startup, readiness, liveness)
+@mcp.custom_route("/health", methods=["GET"])
+async def health_check(_request):
+    """
+    Health check endpoint for Azure Container Apps probes.
+    
+    Returns a simple JSON response indicating the service is healthy.
+    Container Apps uses this for:
+    - Startup probes: Verify container started successfully
+    - Readiness probes: Verify service can accept traffic  
+    - Liveness probes: Verify service is still running
+    """
+    from starlette.responses import JSONResponse
+    return JSONResponse({
+        "status": "healthy", 
+        "service": "mcp-ai-search-server"
+    })
+
+
+# API Key authentication middleware
+class APIKeyMiddleware(BaseHTTPMiddleware):
+    """Middleware to check for API key in X-API-Key header."""
+
+    async def dispatch(self, request, call_next):
+        # Skip auth for health checks
+        if request.url.path in ["/health", "/healthz", "/"]:
+            return await call_next(request)
+        
+        # If MCP_API_KEY is set, require authentication
+        if MCP_API_KEY:
+            api_key = request.headers.get("X-API-Key") or request.query_params.get("api_key")
+            if api_key != MCP_API_KEY:
+                client_host = request.client.host if request.client else "unknown"
+                logger.warning(f"Unauthorized request from {client_host}")
+                return JSONResponse(
+                    {"error": "Unauthorized", "message": "Invalid or missing API key"},
+                    status_code=401,
+                )
+        
+        return await call_next(request)
+
+
+# Add middleware to FastMCP's underlying Starlette app
+# Note: FastMCP exposes the app via mcp.get_app() after initialization
+_middleware_added = False
+
+
+def _add_api_key_middleware():
+    """Add API key middleware to the FastMCP app (called once at startup)."""
+    global _middleware_added
+    if not _middleware_added and MCP_API_KEY:
+        # FastMCP uses Starlette, middleware is added via the ASGI app
+        logger.info("API Key authentication enabled (MCP_API_KEY is set)")
+        _middleware_added = True
+    elif not MCP_API_KEY:
+        logger.warning("API Key authentication DISABLED (MCP_API_KEY not set)")
 
 
 @mcp.tool
@@ -373,9 +437,41 @@ async def resource_get_document(title: str) -> str:
     return await _get_document_impl(title)
 
 
+# ==================== ASGI Application Export ====================
+# Export the ASGI app for production deployment (uvicorn basic_mcp_http:app)
+# This follows the Azure-Samples/python-mcp-demos pattern
+
+def create_app():
+    """Create the ASGI application with optional API key middleware."""
+    fastmcp_app = mcp.http_app(path="/mcp")
+    
+    if MCP_API_KEY:
+        from starlette.applications import Starlette
+        from starlette.middleware import Middleware
+        from starlette.routing import Mount
+        
+        # Create wrapper app with middleware AND FastMCP's lifespan
+        return Starlette(
+            routes=[Mount("/", app=fastmcp_app)],
+            middleware=[Middleware(APIKeyMiddleware)],
+            lifespan=fastmcp_app.lifespan,  # Required for FastMCP session management
+        )
+    else:
+        return fastmcp_app
+
+
+# ASGI application for uvicorn (used in Dockerfile: uvicorn basic_mcp_http:app)
+app = create_app()
+
+
 if __name__ == "__main__":
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", "8000"))
 
+    # Log auth status
+    _add_api_key_middleware()
+
     logger.info(f"Starting MCP Server on http://{host}:{port}/mcp")
-    mcp.run(transport="streamable-http", host=host, port=port)
+    
+    import uvicorn
+    uvicorn.run(app, host=host, port=port)

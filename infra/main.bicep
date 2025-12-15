@@ -19,6 +19,10 @@ param principalId string = ''
 @description('Azure AI Search SKU. Basic or higher required for agentic retrieval.')
 param searchSku string = 'basic'
 
+@secure()
+@description('Optional API key for MCP server authentication. If set, clients must send X-API-Key header.')
+param mcpApiKey string = ''
+
 var resourceToken = toLower(uniqueString(subscription().id, name, location))
 var tags = { 'azd-env-name': name }
 var prefix = '${name}-${resourceToken}'
@@ -217,17 +221,30 @@ module server 'core/host/container-app.bicep' = {
     containerRegistryName: containerRegistry.outputs.name
     identityName: serverIdentity.outputs.name
     targetPort: 8000
-    // Environment variables for AI services
-    env: [
-      { name: 'AZURE_SEARCH_ENDPOINT', value: search.outputs.endpoint }
-      { name: 'AZURE_SEARCH_INDEX', value: search.outputs.indexName }
-      { name: 'AZURE_OPENAI_ENDPOINT', value: openai.outputs.endpoint }
-      { name: 'AZURE_OPENAI_EMBEDDING_DEPLOYMENT', value: openai.outputs.embeddingDeploymentName }
-      { name: 'AZURE_OPENAI_CHAT_DEPLOYMENT', value: openai.outputs.chatDeploymentName }
-      { name: 'AZURE_STORAGE_ACCOUNT_URL', value: storage.outputs.primaryEndpoint }
-      { name: 'AZURE_STORAGE_CONTAINER', value: storage.outputs.containerName }
-      { name: 'AZURE_CLIENT_ID', value: serverIdentity.outputs.clientId }
-    ]
+    // Environment variables for AI services + optional API key auth
+    env: concat(
+      [
+        { name: 'AZURE_SEARCH_ENDPOINT', value: search.outputs.endpoint }
+        { name: 'AZURE_SEARCH_INDEX', value: search.outputs.indexName }
+        { name: 'AZURE_OPENAI_ENDPOINT', value: openai.outputs.endpoint }
+        { name: 'AZURE_OPENAI_EMBEDDING_DEPLOYMENT', value: openai.outputs.embeddingDeploymentName }
+        { name: 'AZURE_OPENAI_CHAT_DEPLOYMENT', value: openai.outputs.chatDeploymentName }
+        { name: 'AZURE_STORAGE_ACCOUNT_URL', value: storage.outputs.primaryEndpoint }
+        { name: 'AZURE_STORAGE_CONTAINER', value: storage.outputs.containerName }
+        { name: 'AZURE_CLIENT_ID', value: serverIdentity.outputs.clientId }
+      ],
+      !empty(mcpApiKey)
+        ? [
+            { name: 'MCP_API_KEY', secretRef: 'mcp-api-key' }
+          ]
+        : []
+    )
+    // Secrets for API key auth
+    secrets: !empty(mcpApiKey)
+      ? [
+          { name: 'mcp-api-key', value: mcpApiKey }
+        ]
+      : []
   }
 }
 

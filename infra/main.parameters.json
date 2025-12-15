@@ -10,6 +10,9 @@
     },
     "principalId": {
       "value": "${AZURE_PRINCIPAL_ID}"
+    },
+    "mcpApiKey": {
+      "value": "${MCP_API_KEY}"
     }
   }
 }

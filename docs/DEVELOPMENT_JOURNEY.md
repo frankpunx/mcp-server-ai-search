@@ -4,6 +4,49 @@ This document chronicles the step-by-step development process for building an MC
 
 ---
 
+## Starting Template
+
+This project was built from a **basic MCP server template** that provides the minimal foundation for deploying an MCP server to Azure Container Apps.
+
+**Base Commit**: [`3cf06ab`](https://github.com/frankpunx/mcp-server-ai-search/commit/3cf06ab) - "simple mcp server container app"
+
+### Template Contents
+
+| Component | Description |
+|-----------|-------------|
+| `src/server/basic_mcp_http.py` | FastMCP server with HTTP transport (hello, echo, add_numbers tools) |
+| `src/server/Dockerfile` | Multi-stage Docker build for production |
+| `infra/main.bicep` | Azure Container Apps + Container Registry + Log Analytics |
+| `infra/core/host/` | Container App, Environment, Registry Bicep modules |
+| `infra/core/security/` | User-assigned identity, registry access |
+| `azure.yaml` | Azure Developer CLI configuration |
+| `.devcontainer/` | Dev container setup with Python, Node, Azure CLI |
+| `.vscode/mcp.json` | VS Code MCP client configuration |
+
+### What the Template Provides
+
+- ✅ Working MCP server with 3 test tools
+- ✅ HTTP streamable transport on port 8000
+- ✅ Docker containerization ready for Azure
+- ✅ Bicep IaC for Container Apps deployment
+- ✅ Managed Identity for Azure authentication
+- ✅ azd integration (`azd up` deploys everything)
+- ✅ Dev container for consistent development
+
+### To Use This Template
+
+```bash
+# Clone and deploy
+git clone <repo>
+cd mcp-server-ai-search
+git checkout 3cf06ab  # Base template state
+azd up
+```
+
+From this foundation, the project evolved to add Azure AI Search, authentication, and more.
+
+---
+
 ## Phase 1: Foundation - Basic MCP Server
 
 ### Step 1.1: Create Simple MCP Server (stdio)
@@ -788,6 +831,253 @@ curl -s -N -H "mcp-session-id: $SESSION" \
 23. **Session required**: Streamable HTTP transport requires `mcp-session-id` header from `initialize` response
 24. **SSE parsing**: Responses are Server-Sent Events — parse lines starting with `data: `
 25. **TODO (docs resources, scalability)**: Current `docs://list`/`docs://{title}` are Search-index-backed (format-agnostic extracted text), which is convenient for PoC but not efficient/scalable because it scans/stitches chunk records. Prefer Blob-backed resources (1 blob = 1 doc).
+
+---
+
+## Ingestion Pipeline Architecture
+
+### How the Pipeline Works
+
+The ingestion pipeline uses an Azure AI Search **Indexer** with automatic blob change detection:
+
+```
+┌─────────────┐    ┌────────────────┐    ┌──────────────┐    ┌─────────────┐
+│   Blob      │───▶│    Indexer     │───▶│   Skillset   │───▶│   Index     │
+│   Storage   │    │ (change track) │    │ (chunk+embed)│    │ (vectors)   │
+└─────────────┘    └────────────────┘    └──────────────┘    └─────────────┘
+```
+
+### Adding a New Document
+
+When you add a new file to the index:
+
+1. **Upload to Blob Storage** → File lands in the `documents` container
+2. **Indexer Detects Changes** → Built-in change tracking detects:
+   - New blobs added
+   - Modified blobs (via `Last-Modified` timestamp)
+   - Deleted blobs (if soft-delete configured)
+3. **Indexer Runs** → Must be triggered (see options below)
+4. **Skillset Processing** → For each new/changed blob:
+   - `SplitSkill` chunks the document (2000 chars, 200 char overlap)
+   - `AzureOpenAIEmbeddingSkill` generates 1536-dim vectors per chunk
+5. **Index Projections** → Each chunk becomes a separate document with:
+   - `chunk` (text), `chunk_vector` (embedding), `title`, `source_url`, `parent_id`
+
+### Triggering the Indexer
+
+The indexer does **NOT** run automatically on file changes by default. Options:
+
+| Method | How | Use Case |
+|--------|-----|----------|
+| **Manual script** | `python scripts/upload_documents.py` | Dev/test uploads |
+| **REST API** | `POST {endpoint}/indexers/documents-indexer/run` | CI/CD pipelines |
+| **Azure Portal** | Click "Run" on indexer blade | One-off manual runs |
+| **Schedule** | Configure indexer with `schedule` param | Production auto-refresh |
+
+### Quick Reference Commands
+
+```bash
+# Upload a single file and trigger indexer
+az storage blob upload \
+  --account-name <storage> \
+  --container-name documents \
+  --file my-new-doc.md \
+  --name my-new-doc.md \
+  --auth-mode login
+
+# Run indexer via REST API
+curl -X POST \
+  "https://<search>.search.windows.net/indexers/documents-indexer/run?api-version=2024-07-01" \
+  -H "Authorization: Bearer $(az account get-access-token --resource https://search.azure.com --query accessToken -o tsv)"
+
+# Or use the upload script (uploads all docs + triggers indexer)
+uv run python scripts/upload_documents.py
+```
+
+### Adding a Scheduled Indexer (Optional)
+
+To enable automatic refresh every 5 minutes, modify `scripts/setup_search.py`:
+
+```python
+from azure.search.documents.indexes.models import IndexingSchedule
+from datetime import timedelta
+
+indexer = SearchIndexer(
+    name=name,
+    # ... existing config ...
+    schedule=IndexingSchedule(interval=timedelta(minutes=5)),
+)
+```
+
+**Note**: Scheduled indexers have a minimum interval of 5 minutes. For near-real-time ingestion, consider:
+- Azure Event Grid triggers on blob events
+- Custom Azure Function watching blob changes
+- Manual trigger via MCP admin endpoint (not yet implemented)
+
+---
+
+## Phase 12: API Key Authentication & Azure Best Practices
+
+### Step 12.1: Validate Against Azure Guidelines
+**Reference**: [Azure-Samples/python-mcp-demos](https://github.com/Azure-Samples/python-mcp-demos)
+
+Compared our implementation against Microsoft's official MCP demo patterns:
+
+| Aspect | Status | Notes |
+|--------|--------|-------|
+| FastMCP Framework | ✅ | Using same library |
+| HTTP Transport | ✅ | `streamable-http` transport |
+| Managed Identity | ✅ | `ManagedIdentityCredential` with `AZURE_CLIENT_ID` |
+| DefaultAzureCredential | ✅ | Fallback for local dev |
+| Tool Definitions | ✅ | `@mcp.tool` with `Annotated` types |
+| Resource Definitions | ✅ | `@mcp.resource("docs://...")` |
+| Health Check | ❌ → ✅ | Added `/health` endpoint |
+| ASGI Export | ❌ → ✅ | Added `app = create_app()` |
+| Health Probes | ❌ → ✅ | Added Bicep probes |
+
+### Step 12.2: Add Health Check Endpoint
+**File**: `src/server/basic_mcp_http.py`
+
+Added health endpoint required for Azure Container Apps probes:
+
+```python
+@mcp.custom_route("/health", methods=["GET"])
+async def health_check(_request):
+    """Health check endpoint for Azure Container Apps probes."""
+    return JSONResponse({
+        "status": "healthy", 
+        "service": "mcp-ai-search-server"
+    })
+```
+
+### Step 12.3: Add Health Probes to Bicep
+**File**: `infra/core/host/container-app.bicep`
+
+Added startup, readiness, and liveness probes:
+
+```bicep
+probes: [
+  {
+    type: 'Startup'
+    httpGet: { path: '/health', port: targetPort }
+    initialDelaySeconds: 10
+    periodSeconds: 3
+    failureThreshold: 30  // Allow up to 90 seconds for startup
+  }
+  {
+    type: 'Readiness'
+    httpGet: { path: '/health', port: targetPort }
+    initialDelaySeconds: 5
+    periodSeconds: 5
+    failureThreshold: 3
+  }
+  {
+    type: 'Liveness'
+    httpGet: { path: '/health', port: targetPort }
+    periodSeconds: 10
+    failureThreshold: 3
+  }
+]
+```
+
+### Step 12.4: Implement API Key Authentication
+**File**: `src/server/basic_mcp_http.py`
+
+Added simple API key middleware as an alternative to OAuth:
+
+```python
+class APIKeyMiddleware(BaseHTTPMiddleware):
+    """Middleware to check for API key in X-API-Key header."""
+
+    async def dispatch(self, request, call_next):
+        # Skip auth for health checks
+        if request.url.path in ["/health", "/healthz", "/"]:
+            return await call_next(request)
+        
+        if MCP_API_KEY:
+            api_key = request.headers.get("X-API-Key") or request.query_params.get("api_key")
+            if api_key != MCP_API_KEY:
+                return JSONResponse(
+                    {"error": "Unauthorized", "message": "Invalid or missing API key"},
+                    status_code=401,
+                )
+        
+        return await call_next(request)
+```
+
+### Step 12.5: Add API Key to Infrastructure
+**File**: `infra/main.bicep`
+
+Added secure parameter for API key:
+
+```bicep
+@secure()
+@description('Optional API key for MCP server authentication')
+param mcpApiKey string = ''
+
+// Pass to container as secret
+secrets: !empty(mcpApiKey) ? [{ name: 'mcp-api-key', value: mcpApiKey }] : []
+env: concat(baseEnv, !empty(mcpApiKey) ? [{ name: 'MCP_API_KEY', secretRef: 'mcp-api-key' }] : [])
+```
+
+**File**: `infra/main.parameters.json`
+
+Map azd environment variable:
+
+```json
+"mcpApiKey": { "value": "${MCP_API_KEY}" }
+```
+
+### Step 12.6: Export ASGI App for Production
+**File**: `src/server/basic_mcp_http.py`
+
+Following Azure sample pattern, export `app` for uvicorn:
+
+```python
+def create_app():
+    """Create the ASGI application with optional API key middleware."""
+    fastmcp_app = mcp.http_app(path="/mcp")
+    
+    if MCP_API_KEY:
+        return Starlette(
+            routes=[Mount("/", app=fastmcp_app)],
+            middleware=[Middleware(APIKeyMiddleware)],
+            lifespan=fastmcp_app.lifespan,  # Required for FastMCP
+        )
+    return fastmcp_app
+
+# ASGI app for uvicorn (Dockerfile: uvicorn basic_mcp_http:app)
+app = create_app()
+```
+
+### Step 12.7: Configure VS Code MCP Client
+**File**: `.vscode/mcp.json`
+
+```json
+{
+  "servers": {
+    "my-mcp-server": {
+      "type": "http",
+      "url": "https://dev-ectun633rwsrm-server.grayground-936c4d31.eastus2.azurecontainerapps.io/mcp",
+      "headers": {
+        "X-API-Key": "your-secret-key-here"
+      }
+    }
+  }
+}
+```
+
+### API Key vs OAuth Trade-offs
+
+| Aspect | API Key (Current) | OAuth (Azure Sample) |
+|--------|-------------------|---------------------|
+| Setup Complexity | ✅ Simple | ❌ Complex (App Registration) |
+| CI/CD Friendly | ✅ Just set env var | ❌ Needs Graph API permissions |
+| User Identity | ❌ No per-user tracking | ✅ Per-user auth |
+| VS Code Integration | ⚠️ Manual header config | ✅ Native OAuth flow |
+| Production Ready | ✅ For internal services | ✅ For user-facing apps |
+
+**Recommendation**: API key is ideal for internal/service-to-service auth. For user-facing apps with identity requirements, consider FastMCP's built-in `AzureProvider`.
 
 ---
 

@@ -4,9 +4,12 @@
 			"type": "http",
 			"url": "http://localhost:8000/mcp"
 		},
-		"my-mcp-server-ffbcc0ba": {
+		"my-mcp-server": {
+			"type": "http",
 			"url": "https://dev-ectun633rwsrm-server.grayground-936c4d31.eastus2.azurecontainerapps.io/mcp",
-			"type": "http"
+			"headers": {
+				"X-API-Key": "your-secret-key-here"
+			}
 		}
 	},
 	"inputs": []

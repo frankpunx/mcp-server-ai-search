@@ -17,6 +17,9 @@ param containerMemory string = '1.0Gi'
 @description('Environment variables for the container')
 param env array = []
 
+@description('Secrets for the container (array of {name, value})')
+param secrets array = []
+
 resource userIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' existing = {
   name: identityName
 }
@@ -62,6 +65,7 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
           identity: userIdentity.id
         }
       ]
+      secrets: secrets
     }
     template: {
       containers: [
@@ -74,6 +78,38 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
             memory: containerMemory
           }
           env: env
+          // Health probes for Azure Container Apps
+          probes: [
+            {
+              type: 'Startup'
+              httpGet: {
+                path: '/health'
+                port: targetPort
+              }
+              initialDelaySeconds: 10
+              periodSeconds: 3
+              failureThreshold: 30 // Allow up to 90 seconds for startup
+            }
+            {
+              type: 'Readiness'
+              httpGet: {
+                path: '/health'
+                port: targetPort
+              }
+              initialDelaySeconds: 5
+              periodSeconds: 5
+              failureThreshold: 3
+            }
+            {
+              type: 'Liveness'
+              httpGet: {
+                path: '/health'
+                port: targetPort
+              }
+              periodSeconds: 10
+              failureThreshold: 3
+            }
+          ]
         }
       ]
       scale: {
