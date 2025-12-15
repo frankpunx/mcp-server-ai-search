@@ -698,6 +698,99 @@ mcp-server-ai-search/
 
 ---
 
+## MCP Resources in VS Code / GitHub Copilot
+
+### Understanding MCP Primitives
+
+MCP servers expose three types of primitives to clients:
+
+| Primitive | Purpose | VS Code Usage | Example |
+|-----------|---------|---------------|---------|
+| **Tools** | Actions with parameters, computation, side effects | Copilot calls automatically or via `#toolname` | `query_knowledge_base`, `add_numbers` |
+| **Resources** | URI-addressed read-only data (cacheable) | Add Context → MCP Resources | `docs://list`, `docs://{title}` |
+| **Prompts** | Pre-configured prompt templates | `/mcp.servername.promptname` | Slash commands in chat |
+
+### Resources vs Tools: When to Use Each
+
+- **Use Resources** for "give me content" — documents, configs, status text, reference data
+- **Use Tools** for "do an action" — search with AI reasoning, mutations, API calls with side effects
+
+Resources are the right abstraction for static/semi-static data because:
+- URI-based addressing enables caching and deterministic retrieval
+- Read-only surface area reduces security risk
+- Better interoperability across MCP clients
+
+### Our Resource Implementation
+
+```python
+@mcp.resource("resource://info")
+async def get_server_info() -> str:
+    """Static server information."""
+    return f"Azure AI Search MCP Server v1.0.0 - KB: {AZURE_KNOWLEDGE_BASE_NAME}"
+
+@mcp.resource("docs://list")
+async def resource_list_documents() -> str:
+    """List all documents in the index."""
+    return await _list_documents_impl()
+
+@mcp.resource("docs://{title}")
+async def resource_get_document(title: str) -> str:
+    """Get document by exact title (e.g., docs://hr-policy-handbook.md)."""
+    return await _get_document_impl(title)
+```
+
+### Testing Resources in VS Code
+
+1. **Add server to VS Code**: `MCP: Add Server` → HTTP → `http://localhost:8000/mcp`
+2. **Browse resources**: Command Palette → `MCP: Browse Resources`
+3. **Attach to chat**: In Copilot Chat → Add Context → MCP Resources → select resource
+4. **Templated resources**: For `docs://{title}`, enter exact title value (e.g., `hr-policy-handbook.md`)
+
+### Testing Resources via MCP Inspector
+
+```bash
+npx @modelcontextprotocol/inspector http://localhost:8000/mcp
+```
+
+Then use the UI to call `resources/list` and `resources/read`.
+
+### Testing Resources via curl (JSON-RPC)
+
+```bash
+# 1. Initialize and capture session
+SESSION=$(curl -s -D - -o /dev/null \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  http://localhost:8000/mcp \
+  --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"curl","version":"1.0"}}}' \
+  | tr -d '\r' | awk 'tolower($1)=="mcp-session-id:"{print $2}')
+
+# 2. List resources
+curl -s -N -H "mcp-session-id: $SESSION" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  http://localhost:8000/mcp \
+  --data '{"jsonrpc":"2.0","id":2,"method":"resources/list","params":{}}' | sed -n 's/^data: //p'
+
+# 3. Read a resource
+curl -s -N -H "mcp-session-id: $SESSION" \
+  -H 'Content-Type: application/json' \
+  -H 'Accept: application/json, text/event-stream' \
+  http://localhost:8000/mcp \
+  --data '{"jsonrpc":"2.0","id":3,"method":"resources/read","params":{"uri":"docs://list"}}' | sed -n 's/^data: //p'
+```
+
+### Key Findings
+
+20. **Resources ≠ Tools**: Resources use `resources/list` + `resources/read` methods, not `tools/call`
+21. **VS Code supports resources**: Add Context → MCP Resources in Copilot Chat (GA in VS Code 1.102+)
+22. **Exact title matching**: Templated resources like `docs://{title}` require exact match (including `.md`)
+23. **Session required**: Streamable HTTP transport requires `mcp-session-id` header from `initialize` response
+24. **SSE parsing**: Responses are Server-Sent Events — parse lines starting with `data: `
+25. **TODO (docs resources, scalability)**: Current `docs://list`/`docs://{title}` are Search-index-backed (format-agnostic extracted text), which is convenient for PoC but not efficient/scalable because it scans/stitches chunk records. Prefer Blob-backed resources (1 blob = 1 doc).
+
+---
+
 ## RBAC Role Assignments Summary
 
 | Principal | Resource | Role | Purpose |

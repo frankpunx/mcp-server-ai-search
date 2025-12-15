@@ -6,11 +6,13 @@ Debug:           F5 in VS Code
 MCP Inspector:   npx @modelcontextprotocol/inspector http://localhost:8000/mcp
 """
 
+import json
 import logging
 import os
 from typing import Annotated
 
 from azure.identity import DefaultAzureCredential, ManagedIdentityCredential
+from azure.search.documents import SearchClient
 from azure.search.documents.knowledgebases import KnowledgeBaseRetrievalClient
 from azure.search.documents.knowledgebases.models import (
     KnowledgeBaseMessage,
@@ -31,6 +33,7 @@ logger = logging.getLogger("AISearchMCP")
 
 # Azure configuration
 AZURE_SEARCH_ENDPOINT = os.getenv("AZURE_SEARCH_ENDPOINT")
+AZURE_SEARCH_INDEX = os.getenv("AZURE_SEARCH_INDEX", "documents")
 AZURE_KNOWLEDGE_BASE_NAME = os.getenv("AZURE_KNOWLEDGE_BASE_NAME", "documents-kb")
 AZURE_KNOWLEDGE_SOURCE_NAME = os.getenv("AZURE_KNOWLEDGE_SOURCE_NAME", "documents-ks")
 AZURE_CLIENT_ID = os.getenv("AZURE_CLIENT_ID")  # For managed identity
@@ -47,6 +50,7 @@ else:
 
 # Initialize Knowledge Base client (lazy initialization)
 _kb_client = None
+_search_client = None
 
 
 def get_kb_client() -> KnowledgeBaseRetrievalClient:
@@ -62,6 +66,21 @@ def get_kb_client() -> KnowledgeBaseRetrievalClient:
         )
         logger.info(f"Initialized KB client: {AZURE_SEARCH_ENDPOINT} / {AZURE_KNOWLEDGE_BASE_NAME}")
     return _kb_client
+
+
+def get_search_client() -> SearchClient:
+    """Get or create the Search client for direct index queries."""
+    global _search_client
+    if _search_client is None:
+        if not AZURE_SEARCH_ENDPOINT:
+            raise ValueError("AZURE_SEARCH_ENDPOINT environment variable is required")
+        _search_client = SearchClient(
+            endpoint=AZURE_SEARCH_ENDPOINT,
+            index_name=AZURE_SEARCH_INDEX,
+            credential=credential,
+        )
+        logger.info(f"Initialized Search client: {AZURE_SEARCH_ENDPOINT} / {AZURE_SEARCH_INDEX}")
+    return _search_client
 
 
 # Initialize the MCP server
@@ -98,22 +117,28 @@ async def add_numbers(
 
 
 @mcp.tool
-async def search(
-    query: Annotated[str, "The search query or question to answer"],
+async def query_knowledge_base(
+    question: Annotated[str, "The question to answer using the knowledge base"],
 ) -> str:
     """
-    Search documents using Azure AI Search with agentic retrieval.
+    Query the knowledge base using AI-powered agentic retrieval.
     
-    This tool searches through indexed documents and returns a synthesized
-    answer with citations. Use this for questions about company policies,
-    product information, technical documentation, or any indexed content.
+    This tool uses Azure AI Search to find relevant documents and synthesize
+    an answer with citations. The AI reasons about your question, plans
+    search queries, and combines information from multiple sources.
+    
+    Use this for questions about:
+    - Company policies and procedures
+    - Product documentation and guides
+    - Technical specifications
+    - Financial reports and metrics
     
     Examples:
     - "What is the vacation policy?"
     - "How do I reset my SmartWidget Pro?"
     - "What was Q3 2025 revenue?"
     """
-    logger.info(f"Search called with query: {query}")
+    logger.info(f"query_knowledge_base called with question: {question}")
     
     try:
         kb_client = get_kb_client()
@@ -122,7 +147,7 @@ async def search(
             messages=[
                 KnowledgeBaseMessage(
                     role="user",
-                    content=[KnowledgeBaseMessageTextContent(text=query)],
+                    content=[KnowledgeBaseMessageTextContent(text=question)],
                 ),
             ],
             # Per Azure docs: explicitly configure knowledge source params
@@ -208,7 +233,6 @@ async def search(
                 activity.append(act.as_dict() if hasattr(act, "as_dict") else {})
         
         # Build structured response
-        import json
         structured_response = {
             "answer": answer,
             "references": references,
@@ -220,13 +244,133 @@ async def search(
         
     except Exception as e:
         logger.error(f"Search failed: {e}")
-        return f"Search failed: {str(e)}"
+        return json.dumps({"error": str(e)})
 
+
+# ==================== Document Functions ====================
+
+async def _list_documents_impl() -> str:
+    """Implementation for listing documents."""
+    try:
+        search_client = get_search_client()
+        
+        # Query all documents and aggregate by title
+        results = search_client.search(
+            search_text="*",
+            select=["title", "source_url"],
+            top=1000,  # Get all chunks
+        )
+        
+        # Aggregate chunks by document title
+        documents: dict[str, dict] = {}
+        for result in results:
+            title = result.get("title", "Unknown")
+            if title not in documents:
+                documents[title] = {
+                    "title": title,
+                    "source_url": result.get("source_url", ""),
+                    "chunk_count": 0,
+                }
+            documents[title]["chunk_count"] += 1
+        
+        doc_list = sorted(documents.values(), key=lambda x: x["title"])
+        
+        logger.info(f"list_documents returned {len(doc_list)} documents")
+        return json.dumps({
+            "total_documents": len(doc_list),
+            "documents": doc_list,
+        }, indent=2)
+        
+    except Exception as e:
+        logger.error(f"list_documents failed: {e}")
+        return json.dumps({"error": str(e)})
+
+
+async def _get_document_impl(title: str) -> str:
+    """Implementation for getting a document by title."""
+    try:
+        search_client = get_search_client()
+        
+        # Search for all chunks of this document
+        results = search_client.search(
+            search_text="*",
+            filter=f"title eq '{title}'",
+            select=["title", "chunk", "source_url"],
+            top=100,  # Get all chunks of this document
+            order_by=["id asc"],  # Order by chunk ID to reconstruct document
+        )
+        
+        chunks = []
+        source_url = ""
+        for result in results:
+            chunks.append(result.get("chunk", ""))
+            if not source_url:
+                source_url = result.get("source_url", "")
+        
+        if not chunks:
+            return json.dumps({"error": f"Document '{title}' not found"})
+        
+        # Concatenate chunks to reconstruct document
+        full_content = "\n\n".join(chunks)
+        
+        logger.info(f"get_document returned {len(chunks)} chunks for '{title}'")
+        return json.dumps({
+            "title": title,
+            "source_url": source_url,
+            "chunk_count": len(chunks),
+            "content": full_content,
+        }, indent=2)
+        
+    except Exception as e:
+        logger.error(f"get_document failed: {e}")
+        return json.dumps({"error": str(e)})
+
+
+# ==================== MCP Resources ====================
+# Note: Document listing and reading is exposed via Resources (not Tools)
+# per MCP best practices:
+# - Resources: For static/semi-static data reading (URI-based, cacheable)
+# - Tools: For actions with parameters and computation (like 'search' with AI reasoning)
+
+# TODO(docs resources): This Search-index-backed docs browser is temporary.
+# - It's convenient for a PoC because the indexer normalizes mixed formats (PDF/DOCX/etc) into
+#   extracted text that is chat-friendly.
+# - It is NOT efficient/scalable because listing/reading documents requires scanning and
+#   stitching chunk records (cost grows with number of chunks, not number of documents).
+#
+# Preferred scalable design:
+# - Make `docs://list` list blobs (1 blob = 1 document) from Azure Blob Storage.
+# - Make `docs://{title}` download the blob for text formats;
 
 @mcp.resource("resource://info")
 async def get_server_info() -> str:
     """Get information about the MCP server."""
     return f"Azure AI Search MCP Server v1.0.0 - Knowledge Base: {AZURE_KNOWLEDGE_BASE_NAME}"
+
+
+@mcp.resource("docs://list")
+async def resource_list_documents() -> str:
+    """
+    List all available documents as an MCP resource.
+    
+    URI: docs://list
+    Returns: JSON list of document titles with metadata
+    """
+    logger.info("Resource docs://list accessed")
+    return await _list_documents_impl()
+
+
+@mcp.resource("docs://{title}")
+async def resource_get_document(title: str) -> str:
+    """
+    Get a specific document by title as an MCP resource.
+    
+    URI: docs://{title}
+    Example: docs://hr-policy-handbook.md
+    Returns: Full document content with metadata
+    """
+    logger.info(f"Resource docs://{title} accessed")
+    return await _get_document_impl(title)
 
 
 if __name__ == "__main__":

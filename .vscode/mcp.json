@@ -1,9 +1,13 @@
 {
-  "servers": {
-    "basic-mcp": {
-      "type": "http",
-      "url": "http://localhost:8000/mcp"
-    }
-  },
-  "inputs": []
+	"servers": {
+		"basic-mcp": {
+			"type": "http",
+			"url": "http://localhost:8000/mcp"
+		},
+		"my-mcp-server-ffbcc0ba": {
+			"url": "https://dev-ectun633rwsrm-server.grayground-936c4d31.eastus2.azurecontainerapps.io/mcp",
+			"type": "http"
+		}
+	},
+	"inputs": []
 }
