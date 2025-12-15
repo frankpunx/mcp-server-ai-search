@@ -4,6 +4,14 @@ name: mcp-server-ai-search
 metadata:
   template: mcp-server-ai-search@0.1.0
 
+hooks:
+  postprovision:
+    shell: sh
+    run: |
+      echo "🔧 Running post-provision setup..."
+      cd /workspaces/mcp-server-ai-search && uv run python scripts/setup_search.py
+    continueOnError: false
+
 services:
   server:
     project: .

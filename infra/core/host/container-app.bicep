@@ -6,7 +6,6 @@ param containerAppsEnvironmentName string
 param containerRegistryName string
 param identityName string
 
-param exists bool = false
 param targetPort int = 8000
 
 @description('CPU cores allocated to a single container instance')
@@ -14,6 +13,9 @@ param containerCpuCoreCount string = '0.5'
 
 @description('Memory allocated to a single container instance')
 param containerMemory string = '1.0Gi'
+
+@description('Environment variables for the container')
+param env array = []
 
 resource userIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' existing = {
   name: identityName
@@ -65,13 +67,13 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
       containers: [
         {
           name: 'main'
-          image: exists
-            ? 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
-            : 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
+          // Note: azd deploy will replace this with the actual image after build
+          image: 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
           resources: {
             cpu: json(containerCpuCoreCount)
             memory: containerMemory
           }
+          env: env
         }
       ]
       scale: {

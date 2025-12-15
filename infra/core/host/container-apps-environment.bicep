@@ -2,11 +2,9 @@ param name string
 param location string = resourceGroup().location
 param tags object = {}
 
-param logAnalyticsWorkspaceName string = ''
+param logAnalyticsWorkspaceName string
 
-var useLogging = !empty(logAnalyticsWorkspaceName)
-
-resource logAnalyticsWorkspace 'Microsoft.OperationalInsights/workspaces@2022-10-01' existing = if (useLogging) {
+resource logAnalyticsWorkspace 'Microsoft.OperationalInsights/workspaces@2022-10-01' existing = {
   name: logAnalyticsWorkspaceName
 }
 
@@ -15,17 +13,13 @@ resource containerAppsEnvironment 'Microsoft.App/managedEnvironments@2024-03-01'
   location: location
   tags: tags
   properties: {
-    appLogsConfiguration: useLogging
-      ? {
-          destination: 'log-analytics'
-          logAnalyticsConfiguration: {
-            customerId: logAnalyticsWorkspace.properties.customerId
-            sharedKey: logAnalyticsWorkspace.listKeys().primarySharedKey
-          }
-        }
-      : {
-          destination: 'azure-monitor'
-        }
+    appLogsConfiguration: {
+      destination: 'log-analytics'
+      logAnalyticsConfiguration: {
+        customerId: logAnalyticsWorkspace.properties.customerId
+        sharedKey: logAnalyticsWorkspace.listKeys().primarySharedKey
+      }
+    }
     zoneRedundant: false
   }
 }
