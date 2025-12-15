@@ -1,0 +1,13 @@
+{
+  "servers": {
+    "basic-mcp": {
+      "type": "http",
+      "url": "http://localhost:8000/mcp"
+    },
+    "remote-mcp-azure": {
+      "type": "http",
+      "url": "https://dev-vsvjii5hkbw7s-server.thankfulbeach-b70200c8.spaincentral.azurecontainerapps.io/mcp"
+    }
+  },
+  "inputs": []
+}

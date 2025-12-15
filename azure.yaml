@@ -1,0 +1,15 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+
+name: mcp-server-ai-search
+metadata:
+  template: mcp-server-ai-search@0.1.0
+
+services:
+  server:
+    project: .
+    language: docker
+    host: containerapp
+    docker:
+      remoteBuild: false
+      path: ./src/server/Dockerfile
+      context: .

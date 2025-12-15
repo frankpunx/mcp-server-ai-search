@@ -1,0 +1,16 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "MCP Server",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/src/server/basic_mcp_http.py",
+      "console": "integratedTerminal",
+      "cwd": "${workspaceFolder}/src/server",
+      "env": {
+        "LOG_LEVEL": "DEBUG"
+      }
+    }
+  ]
+}
