@@ -122,6 +122,33 @@ def test_mcp_server(url: str) -> None:
                                                     content = add_data["result"].get("content", [])
                                                     if content:
                                                         print(f"   ✅ 42 + 58 = {content[0].get('text', '')}")
+                                        
+                                        # Test 5: Call search tool
+                                        print("\n5️⃣  Testing tools/call (search)...")
+                                        search_payload = {
+                                            "jsonrpc": "2.0",
+                                            "method": "tools/call",
+                                            "params": {
+                                                "name": "search",
+                                                "arguments": {"query": "What is the vacation policy?"}
+                                            },
+                                            "id": 5
+                                        }
+                                        search_response = client.post(url, json=search_payload, headers=tools_headers, timeout=60)
+                                        
+                                        for line in search_response.text.split("\n"):
+                                            if line.startswith("data: "):
+                                                search_data = json.loads(line[6:])
+                                                if "result" in search_data:
+                                                    content = search_data["result"].get("content", [])
+                                                    if content:
+                                                        result_text = content[0].get('text', '')
+                                                        # Show first 200 chars
+                                                        preview = result_text[:200] + "..." if len(result_text) > 200 else result_text
+                                                        print(f"   ✅ Search response:\n      {preview}")
+                                                        if "Sources:" in result_text:
+                                                            sources = result_text.split("Sources:")[1].strip()
+                                                            print(f"   📚 {sources[:100]}")
                         break
         else:
             print(f"   ❌ Failed: {response.status_code} {response.text}")

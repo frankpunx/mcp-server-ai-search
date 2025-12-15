@@ -433,13 +433,182 @@ Updated Mermaid diagrams to reflect current implementation:
 
 ---
 
-## Phase 10: AI Search MCP Integration (TODO)
+## Phase 10: AI Search MCP Integration
 
 ### Step 10.1: Add Search Tool to MCP Server
-Add tool to query Azure AI Search Knowledge Base from the MCP server.
+**File**: `src/server/basic_mcp_http.py`
 
-### Step 10.2: Deploy Updated MCP Server
-Redeploy with AI Search capabilities enabled.
+Added the `search` tool that integrates Azure AI Search Knowledge Base retrieval:
+
+```python
+from azure.search.documents.knowledgebases.models import (
+    KnowledgeBaseMessage,
+    KnowledgeBaseMessageTextContent,
+    KnowledgeBaseRetrievalRequest,
+    KnowledgeRetrievalLowReasoningEffort,
+    SearchIndexKnowledgeSourceParams,
+)
+
+@mcp.tool
+async def search(
+    query: Annotated[str, "The search query or question to answer"],
+) -> str:
+    """Search documents using Azure AI Search with agentic retrieval."""
+    kb_client = get_kb_client()
+    
+    request = KnowledgeBaseRetrievalRequest(
+        messages=[
+            KnowledgeBaseMessage(
+                role="user",
+                content=[KnowledgeBaseMessageTextContent(text=query)],
+            ),
+        ],
+        # Per Azure docs: explicitly configure knowledge source params
+        knowledge_source_params=[
+            SearchIndexKnowledgeSourceParams(
+                knowledge_source_name=AZURE_KNOWLEDGE_SOURCE_NAME,
+                include_references=True,
+                include_reference_source_data=True,
+                always_query_source=True,
+            )
+        ],
+        # Include activity for debugging/logging query planning steps
+        include_activity=True,
+        # Use low reasoning effort for faster responses
+        retrieval_reasoning_effort=KnowledgeRetrievalLowReasoningEffort(),
+    )
+    
+    result = kb_client.retrieve(retrieval_request=request)
+    # Returns structured JSON with answer, references, and activity
+```
+
+**Key Implementation Details**:
+- Uses `KnowledgeBaseRetrievalClient` for agentic retrieval
+- Lazy initialization of KB client for efficiency
+- **Full Azure docs compliance** with all request parameters:
+  - `knowledge_source_params` - Explicit source configuration
+  - `include_references=True` - Get citation data
+  - `include_reference_source_data=True` - Get full chunk content
+  - `always_query_source=True` - Always query even for similar queries
+  - `include_activity=True` - Get query planning steps
+  - `retrieval_reasoning_effort` - Control reasoning depth
+- Returns **structured JSON** with:
+  - `answer` - Synthesized response with `[ref_id:N]` citations
+  - `references` - Full source data including chunk content, URLs
+  - `activity` - Query planning, search steps, token usage
+
+**Structured Response Format**:
+```json
+{
+  "answer": "The vacation policy provides... [ref_id:0]",
+  "references": [
+    {
+      "id": "0",
+      "document": "hr-policy-handbook.md",
+      "score": 2.38,
+      "source_data": {
+        "chunk": "# Contoso Corporation Employee Handbook...",
+        "title": "hr-policy-handbook.md",
+        "source_url": "https://storage.blob.../hr-policy-handbook.md"
+      }
+    }
+  ],
+  "activity": [
+    {"id": 0, "type": "modelQueryPlanning", "elapsed_ms": 1168, "input_tokens": 1470},
+    {"id": 1, "type": "searchIndex", "elapsed_ms": 260, "search": "vacation policy details"},
+    {"id": 2, "type": "searchIndex", "elapsed_ms": 327, "search": "company vacation policy"},
+    {"id": 3, "type": "searchIndex", "elapsed_ms": 222, "search": "standard vacation guidelines"},
+    {"id": 4, "type": "agenticReasoning", "reasoning_tokens": 28488},
+    {"id": 5, "type": "modelAnswerSynthesis", "elapsed_ms": 2247, "output_tokens": 141}
+  ]
+}
+```
+
+**Citation Parsing Challenge**:
+The `doc_key` field contains a hash + base64-encoded blob URL + chunk suffix:
+```
+hash_aHR0cHM6Ly9zdG9yYWdlLmJsb2IuY29yZS53aW5kb3dzLm5ldC9kb2NzL2hyLXBvbGljeS1oYW5kYm9vay5tZA_chunks_0
+```
+
+Solution:
+```python
+# Extract base64 part between hash and _chunks_
+b64_part = doc_key.split("_chunks_")[0].split("_", 1)[1]
+# Use URL-safe base64 decode
+decoded = base64.urlsafe_b64decode(b64_part).decode("utf-8")
+# Extract filename from blob URL
+doc_name = decoded.split("/")[-1]
+```
+
+### Step 10.2: Add Dev Dependency for Testing
+**File**: `pyproject.toml`
+
+Added `httpx` to dev dependencies for the MCP server test script:
+```toml
+[dependency-groups]
+dev = [
+    "ruff>=0.8.0",
+    "pre-commit>=4.0.0",
+    "pytest>=8.0.0",
+    "httpx>=0.27.0",
+]
+```
+
+### Step 10.3: Update Test Script
+**File**: `scripts/test_mcp_server.py`
+
+Extended test script to include search tool testing:
+
+```bash
+uv run python scripts/test_mcp_server.py
+```
+
+**Tests**:
+1. MCP initialize handshake
+2. List available tools (now 4: hello, echo, add_numbers, search)
+3. Call `hello` tool
+4. Call `add_numbers` tool
+5. Call `search` tool with vacation policy query
+
+### Step 10.4: Deploy to Azure Container Apps
+```bash
+azd deploy server
+```
+
+**Deployment URL**: `https://dev-ectun633rwsrm-server.grayground-936c4d31.eastus2.azurecontainerapps.io/mcp`
+
+### Step 10.5: Verify Deployed Server
+
+**Test Results**:
+```
+🔗 Testing MCP Server: https://dev-ectun633rwsrm-server.../mcp
+============================================================
+
+1️⃣  Testing initialize...
+   ✅ Server: Azure AI Search MCP Server v2.14.0
+   ✅ Protocol: 2024-11-05
+
+2️⃣  Testing tools/list...
+   ✅ Found 4 tools:
+      • hello: Say hello to someone.
+      • echo: Echo back the provided message.
+      • add_numbers: Add two numbers together.
+      • search: Search documents using Azure AI Search with agentic retrieval
+
+3️⃣  Testing tools/call (hello)...
+   ✅ Response: Hello, World! Welcome to the MCP Server.
+
+4️⃣  Testing tools/call (add_numbers)...
+   ✅ 42 + 58 = 100.0
+
+5️⃣  Testing tools/call (search)...
+   ✅ Search response: {"answer": "Contoso Corporation's vacation policy..."}
+   📚 [0] hr-policy-handbook.md (score: 2.44)
+
+============================================================
+🎉 All MCP server tests passed!
+============================================================
+```
 
 ---
 
@@ -450,8 +619,7 @@ mcp-server-ai-search/
 ├── azure.yaml                    # azd configuration
 ├── pyproject.toml               # Python dependencies
 ├── src/server/
-│   ├── basic_mcp_http.py        # Basic MCP server (hello, echo, add)
-│   ├── ai_search_mcp.py         # AI Search MCP server (TODO: deploy)
+│   ├── basic_mcp_http.py        # MCP server with AI Search (deployed)
 │   └── Dockerfile               # Container configuration
 ├── scripts/
 │   ├── setup_search.py          # Post-provision AI Search setup
@@ -521,6 +689,12 @@ mcp-server-ai-search/
 11. **Keyword analyzer for projections**: Index key field must have `analyzer_name="keyword"` when using index projections
 12. **Embedding skill context**: Set `context="/document/chunks/*"` when embedding chunked content
 13. **Agentic retrieval client**: Use `KnowledgeBaseRetrievalClient` from `azure.search.documents.knowledgebases`, not `SearchIndexClient`
+14. **Streamable HTTP uses SSE**: MCP's streamable-http transport requires SSE (Server-Sent Events) - clients must accept `text/event-stream` and parse `data:` prefixed responses
+15. **KB response structure**: `result.response` is a list of messages, each with `content` array; use `as_dict()` for type-safe access
+16. **Base64 doc keys**: Knowledge Base references use URL-safe base64 encoded blob URLs in `doc_key` field
+17. **Azure docs compliance**: Use `SearchIndexKnowledgeSourceParams` with `include_references`, `include_reference_source_data`, `always_query_source` for full control
+18. **Activity logging**: Set `include_activity=True` to get query planning steps, search queries, and token usage
+19. **Reasoning effort**: Use `KnowledgeRetrievalLowReasoningEffort` for faster responses, or omit for deeper reasoning
 
 ---
 
